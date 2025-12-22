@@ -5,9 +5,10 @@ import requests
 import unicodedata
 from datetime import datetime
 from difflib import get_close_matches
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 
-from configs.locations import LOCATIONS
+from vietnam_provinces import PROVINCES
+from vietnam_wards import WARDS
 from services.error_handler import handle_service_error
 
 logger = logging.getLogger("WeatherService")
@@ -23,92 +24,114 @@ def normalize_query(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     return " ".join(text.split()).strip()
 
-# ------------------- REGION RESOLUTION -------------------
-def resolve_region(region: str = None, lat: float = None, lon: float = None) -> Optional[Dict[str, Any]]:
-    """Tìm thông tin vùng từ tên địa danh hoặc lat/lon. Chỉ dùng LOCATIONS."""
+# ------------------- FALLBACK GEOCODE -------------------
+def fallback_geocode(region: str) -> Optional[Dict[str, float]]:
+    """Tra cứu tọa độ từ OpenStreetMap Nominatim khi thiếu lat/lon."""
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {"q": region, "format": "json", "limit": 1}
+        headers = {"User-Agent": "WeatherGfsApp/1.0"}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data:
+                lat = float(data[0]["lat"])
+                lon = float(data[0]["lon"])
+                return {"lat": lat, "lon": lon, "source": "osm"}
+        return None
+    except Exception as e:
+        logger.error(f"[fallback_geocode] Exception: {e}")
+        return None
 
-    # Ưu tiên tọa độ direct source
+# ------------------- REGION RESOLUTION -------------------
+def resolve_region(region: str = None, lat: float = None, lon: float = None) -> Dict[str, Any]:
+    """Tìm thông tin vùng từ tên địa danh hoặc lat/lon. Dùng PROVINCES và WARDS, fallback OSM."""
+
+    # Ưu tiên tọa độ trực tiếp
     if lat is not None and lon is not None:
         try:
             lat = float(lat); lon = float(lon)
             if -90 <= lat <= 90 and -180 <= lon <= 180:
-                logger.debug(f"[resolve_region] Direct lat/lon accepted: lat={lat}, lon={lon}")
-                return {
-                    "name": region or "Unknown region",
-                    "lat": lat,
-                    "lon": lon,
-                    "source": "direct"
-                }
-            else:
-                logger.warning(f"[resolve_region] Lat/lon out of range: lat={lat}, lon={lon}")
+                return {"name": region or "Unknown region", "lat": lat, "lon": lon, "source": "direct"}
         except Exception as e:
             logger.error(f"[resolve_region] Invalid lat/lon: {e}")
-        return None
+        return {"name": region or "Unknown region", "lat": None, "lon": None, "source": "invalid"}
 
-    # Nếu có region, tra cứu trong LOCATIONS
     if region:
         query = normalize_query(region)
-        logger.debug(f"[resolve_region] Query normalized: '{region}' -> '{query}'")
 
-        # 1) Exact match theo key
-        for key_name, info in LOCATIONS.items():
-            if normalize_query(key_name) == query:
-                logger.info(f"[resolve_region] Exact match key: '{key_name}'")
-                return {
-                    "name": key_name,
-                    "lat": info.get("lat"),
-                    "lon": info.get("lon"),
-                    "source": info.get("type", "unknown")
-                }
+        # Exact match trong PROVINCES
+        for province in PROVINCES:
+            if normalize_query(province) == query:
+                return {"name": province, "lat": None, "lon": None, "source": "province"}
 
-        # 2) Exact match theo alias
-        for key_name, info in LOCATIONS.items():
-            for alias in info.get("aliases", []):
-                if normalize_query(alias) == query:
-                    logger.info(f"[resolve_region] Exact match alias: '{alias}' -> '{key_name}'")
-                    return {
-                        "name": key_name,
-                        "lat": info.get("lat"),
-                        "lon": info.get("lon"),
-                        "source": info.get("type", "unknown")
-                    }
+        # Exact match trong WARDS (chỉ xử lý dict)
+        for ward in WARDS:
+            if not isinstance(ward, dict):
+                continue
+            try:
+                ward_name = f"{ward.get('xa')} {ward.get('ten')} {ward.get('tinh')}"
+                if normalize_query(ward_name) == query:
+                    info = {"name": ward_name, "lat": ward.get("lat"), "lon": ward.get("lon"), "source": "ward"}
+                    # Fallback nếu thiếu tọa độ
+                    if info["lat"] is None or info["lon"] is None:
+                        osm = fallback_geocode(region)
+                        if osm:
+                            info["lat"] = osm["lat"]; info["lon"] = osm["lon"]; info["source"] = "osm"
+                    return info
+            except Exception as e:
+                logger.warning(f"[resolve_region] Ward parse error: {e}")
+                continue
 
-        # 3) Fuzzy search trên cả key và alias
-        normalized_keys = {normalize_query(k): k for k in LOCATIONS.keys()}
-        normalized_alias_map = {}
-        for k, info in LOCATIONS.items():
-            for a in info.get("aliases", []):
-                normalized_alias_map[normalize_query(a)] = k
-
-        fuzzy_pool = list(normalized_keys.keys()) + list(normalized_alias_map.keys())
-        matches = get_close_matches(query, fuzzy_pool, n=1, cutoff=0.85)
+        # Fuzzy search trên PROVINCES
+        matches = get_close_matches(query, [normalize_query(p) for p in PROVINCES], n=1, cutoff=0.85)
         if matches:
             best = matches[0]
-            key_name = normalized_keys.get(best) or normalized_alias_map.get(best)
-            if key_name:
-                info = LOCATIONS.get(key_name, {})
-                logger.info(f"[resolve_region] Fuzzy match: '{region}' -> '{key_name}'")
-                return {
-                    "name": key_name,
-                    "lat": info.get("lat"),
-                    "lon": info.get("lon"),
-                    "source": info.get("type", "unknown")
-                }
-        else:
-            logger.warning(f"[resolve_region] No fuzzy match for query='{query}'")
+            for province in PROVINCES:
+                if normalize_query(province) == best:
+                    return {"name": province, "lat": None, "lon": None, "source": "province"}
 
-        # 4) Không tìm thấy
-        logger.warning(f"[resolve_region] Không tìm thấy địa danh: {region}")
-        return {
-            "name": region,
-            "lat": None,
-            "lon": None,
-            "source": "not_found"
-        }
+        # Fuzzy search trên WARDS (chỉ xử lý dict)
+        ward_names = []
+        for w in WARDS:
+            if isinstance(w, dict):
+                try:
+                    ward_names.append(normalize_query(f"{w.get('xa')} {w.get('ten')} {w.get('tinh')}"))
+                except Exception as e:
+                    logger.warning(f"[resolve_region] Ward normalize error: {e}")
+                    continue
+        matches = get_close_matches(query, ward_names, n=1, cutoff=0.85)
+        if matches:
+            best = matches[0]
+            for ward in WARDS:
+                if not isinstance(ward, dict):
+                    continue
+                try:
+                    ward_name = normalize_query(f"{ward.get('xa')} {ward.get('ten')} {ward.get('tinh')}")
+                    if ward_name == best:
+                        info = {
+                            "name": f"{ward.get('xa')} {ward.get('ten')} {ward.get('tinh')}",
+                            "lat": ward.get("lat"),
+                            "lon": ward.get("lon"),
+                            "source": "ward"
+                        }
+                        if info["lat"] is None or info["lon"] is None:
+                            osm = fallback_geocode(region)
+                            if osm:
+                                info["lat"] = osm["lat"]; info["lon"] = osm["lon"]; info["source"] = "osm"
+                        return info
+                except Exception as e:
+                    logger.warning(f"[resolve_region] Ward fuzzy error: {e}")
+                    continue
 
-    # Không có region và không có lat/lon hợp lệ
-    logger.warning("[resolve_region] No region and no lat/lon provided")
-    return None
+        # Không tìm thấy → fallback OSM
+        osm = fallback_geocode(region)
+        if osm:
+            return {"name": region, "lat": osm["lat"], "lon": osm["lon"], "source": "osm"}
+
+        return {"name": region, "lat": None, "lon": None, "source": "not_found"}
+
+    return {"name": "Unknown region", "lat": None, "lon": None, "source": "empty"}
 
 # ------------------- WEATHER FETCH -------------------
 def fetch_weather_data(lat: float, lon: float, days: int = 10) -> Optional[Dict[str, Any]]:
@@ -147,7 +170,6 @@ def fetch_weather_data(lat: float, lon: float, days: int = 10) -> Optional[Dict[
         logger.error(f"[fetch_weather_data] Exception: {e}")
         return None
 
-
 # ------------------- WEATHER RESPONSE -------------------
 def build_weather_response(region_info: Dict[str, Any], weather_data: Dict[str, Any]) -> Dict[str, Any]:
     """Xây dựng JSON trả về cho endpoint weather/chat, luôn an toàn và thống nhất."""
@@ -158,18 +180,26 @@ def build_weather_response(region_info: Dict[str, Any], weather_data: Dict[str, 
             "lon": region_info.get("lon"),
             "source": region_info.get("source", "unknown"),
             "timestamp": datetime.now().isoformat(),
-            "weather": weather_data if weather_data else {},
+            "weather": {},
             "error": None
         }
 
+        # Nếu thiếu tọa độ → trả về lỗi rõ ràng
         if result["lat"] is None or result["lon"] is None:
-            logger.warning(
-                f"[build_weather_response] Missing lat/lon for region='{result['region']}' source='{result['source']}'"
-            )
+            msg = f"Không tìm thấy tọa độ cho {result['region']} (source={result['source']})"
+            logger.warning(f"[build_weather_response] {msg}")
+            result["error"] = msg
+            return result
 
-        if not result["weather"]:
-            logger.debug(f"[build_weather_response] Empty weather data for region='{result['region']}'")
+        # Nếu không có dữ liệu thời tiết
+        if not weather_data:
+            msg = f"Không có dữ liệu thời tiết cho {result['region']}"
+            logger.warning(f"[build_weather_response] {msg}")
+            result["error"] = msg
+            return result
 
+        # Nếu có dữ liệu hợp lệ
+        result["weather"] = weather_data
         logger.info(f"[build_weather_response] Response built for region='{result['region']}'")
         return result
 

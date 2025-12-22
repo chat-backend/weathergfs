@@ -14,7 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
 
 from services.state import state
-from configs.locations import LOCATIONS
+from vietnam_provinces import PROVINCES
+from vietnam_wards import WARDS
 from services.weather_services import RegionIndex, WeatherService
 from services.app_utils import resolve_region, fetch_weather_data, build_weather_response
 from services.open_meteo.open_meteo import fetch_forecast, read_cache, get_cache_summary
@@ -102,14 +103,21 @@ app.include_router(notify_router, tags=["Notify"])
 app.include_router(chat_router, tags=["Weather Services"])
 
 # ==============================
-# Region data initialization (using LOCATIONS only)
+# Region data initialization
 # ==============================
-from configs.locations import LOCATIONS
+# Đồng bộ dữ liệu địa danh vào state để các service khác có thể truy cập
+try:
+    state["provinces"] = PROVINCES
+    state["wards"] = WARDS
 
-# Đồng bộ state với LOCATIONS để các service khác có thể truy cập
-state["locations"] = LOCATIONS
+    provinces_count = len(PROVINCES) if PROVINCES else 0
+    wards_count = len(WARDS) if WARDS else 0
 
-logger.info(f"✅ Loaded {len(LOCATIONS)} locations (34 provinces + 94 wards of Đà Nẵng)")
+    logger.info(f"✅ Loaded {provinces_count} provinces + {wards_count} wards into state")
+except Exception as e:
+    logger.error(f"❌ Error initializing region data: {e}")
+    state["provinces"] = []
+    state["wards"] = []
 
 # ==============================
 # Startup & Shutdown events

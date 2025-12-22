@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>WeatherGfs Chat</title>
+  <style>
+    body { font-family: sans-serif; background: #f0f0f0; padding: 20px; }
+    #chatbox { width: 100%; height: 500px; overflow-y: auto; background: #fff; padding: 10px; border: 1px solid #ccc; margin-bottom: 10px; white-space: pre-wrap; }
+    #input { width: 50%; padding: 10px; }
+    #send { padding: 10px; margin-left: 5px; }
+    #hint { font-size: 0.9em; color: #555; margin-top: 5px; }
+    .user { color: #333; }
+    .bot { color: #0066cc; }
+    .system { color: #990000; }
+    pre { background: #f9f9f9; padding: 10px; border-left: 3px solid #0066cc; }
+    table { border-collapse: collapse; margin-top: 5px; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 4px; font-size: 0.85em; text-align: center; }
+    th { background: #eee; }
+  </style>
+</head>
+<body>
+<h2>🗣️ WeatherGfs Vietnam — Khung Chat</h2>
+<div id="chatbox"></div>
+<input type="text" id="input" placeholder="Nhập tên tỉnh/thành hoặc phường/xã..." />
+<button id="send">Gửi</button>
+<div id="hint">
+  Hướng dẫn: Thời tiết... ví dụ: TP. Đà Nẵng, Quảng Ngãi, Xã Lãnh Ngọc, Phường Tam Kỳ, Đặc Khu Hoàng Sa... hôm nay
+</div>
+
+<script>
+  const chatbox = document.getElementById("chatbox");
+  const input = document.getElementById("input");
+  const send = document.getElementById("send");
+
+  const API_BASE = "http://127.0.0.1:8000";
+
+  function normalizeRegion(text) {
+    const stopwords = ["thời tiết", "hôm nay", "ngày mai", "ở", "tại"];
+    let region = text.toLowerCase();
+    stopwords.forEach(w => { region = region.replace(w, ""); });
+    return region.trim();
+  }
+
+  function appendMessage(sender, text, cls="bot") {
+    chatbox.innerHTML += `<p class="${cls}"><strong>${sender}:</strong><br>${text}</p>`;
+    chatbox.scrollTop = chatbox.scrollHeight;
+  }
+
+  function renderResponse(data) {
+    if (data.status === "error") {
+      return `⚠️ Lỗi: ${data.message}`;
+    }
+    const d = data.data || {};
+    let reply = "";
+    if (d.bulletin?.text) {
+      reply += `<pre>${d.bulletin.text}</pre><br>`;
+    }
+    return reply;
+  }
+
+  async function callAPI(region) {
+    try {
+      const url = `${API_BASE}/v1/chat?region=${encodeURIComponent(region)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Lỗi kết nối API (${res.status})`);
+      const data = await res.json();
+      appendMessage("WeatherGfs", renderResponse(data));
+    } catch (err) {
+      appendMessage("WeatherGfs", `⚠️ Không thể lấy dữ liệu thời tiết. ${err.message}`);
+    }
+  }
+
+  async function sendMessage() {
+    const message = input.value.trim();
+    if (!message) return;
+    appendMessage("Bạn", message, "user");
+    input.value = "";
+    const region = normalizeRegion(message);
+    await callAPI(region);
+  }
+
+  send.onclick = sendMessage;
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") sendMessage();
+  });
+</script>
+</body>
+</html>
